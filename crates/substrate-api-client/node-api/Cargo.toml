@@ -1,0 +1,60 @@
+[package]
+name = "ac-node-api"
+version = "0.2.0"
+license = "Apache-2.0"
+edition = "2021"
+
+[dependencies]
+bitvec = { version = "1.0.0", default-features = false, features = ["alloc"] }
+codec = { package = "parity-scale-codec", version = "3.2.1", features = ["derive", "bit-vec"], default-features = false }
+derive_more = { version = "0.99.17" }
+either = { version = "1.6.1", default-features = false }
+hex = { version = "0.4.3", default-features = false }
+log = { version = "0.4.14", default-features = false }
+scale-info = { version = "2.0.1", features = ["derive", "decode", "bitvec"], default-features = false }
+serde = { version = "1.0.136", features = ["derive"], default-features = false }
+serde_json = { version = "1.0.79", default-features = false, features = ["alloc"] }
+
+# local
+ac-primitives = { path = "../primitives", default-features = false }
+
+# substrate
+frame-metadata = { default-features = false, git = "https://github.com/paritytech/frame-metadata", features = ["v14", "serde_full", "decode"] }
+frame-support = { default-features = false, git = "https://github.com/paritytech/substrate.git", branch = "master" }
+frame-system = { default-features = false, git = "https://github.com/paritytech/substrate.git", branch = "master" }
+sp-core = { default-features = false, features = ["full_crypto"], git = "https://github.com/paritytech/substrate.git", branch = "master" }
+sp-runtime = { default-features = false, git = "https://github.com/paritytech/substrate.git", branch = "master" }
+sp-std = { default-features = false, git = "https://github.com/paritytech/substrate.git", branch = "master" }
+
+# need to add this for `no_std`
+sp-application-crypto = { default-features = false, git = "https://github.com/paritytech/substrate.git", features = ["full_crypto"], branch = "master" }
+sp-runtime-interface = { default-features = false, git = "https://github.com/paritytech/substrate.git", branch = "master" }
+
+[features]
+default = ["std"]
+# To support `no_std` builds in non-32 bit environments.
+disable_target_static_assertions = [
+    "sp-runtime-interface/disable_target_static_assertions",
+]
+std = [
+    "bitvec/std",
+    "codec/std",
+    "either/default",
+    "hex/std",
+    "log/std",
+    "scale-info/std",
+    "serde/std",
+    "serde_json/std",
+    # local
+    "ac-primitives/std",
+    # substrate
+    "frame-metadata/std",
+    "frame-support/std",
+    "frame-system/std",
+    "sp-core/std",
+    "sp-runtime/std",
+    "sp-std/std",
+    # no_std support
+    "sp-application-crypto/std",
+    "sp-runtime-interface/std",
+]

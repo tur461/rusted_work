@@ -1,0 +1,175 @@
+use async_std::{self, io};
+use futures::{future::Either, prelude::*, select};
+use libp2p::{
+    core::{
+        muxing::StreamMuxerBox,
+        transport::{upgrade, OrTransport},
+    },
+    gossipsub, identity, mdns, noise,
+    swarm::{NetworkBehaviour, SwarmBuilder, SwarmEvent},
+    tcp, yamux, PeerId, Transport,
+};
+use libp2p_quic as quic;
+use std::collections::hash_map::DefaultHasher;
+use std::error::Error;
+use std::hash::{Hash, Hasher};
+use std::time::Duration;
+
+
+#[async_std::main]
+async fn main() -> Result<(), Box<dyn Error>> {
+    // We create a custom network behaviour that combines Gossipsub and Mdns.
+    enum MyEvent {
+        Mdns(mdns::Event),
+        Gossipsub(gossipsub::Event),
+    }
+
+    impl From<gossipsub::Event> for MyEvent {
+        fn from(event: gossipsub::Event) -> Self {
+            MyEvent::Gossipsub(event)
+        }
+    }
+
+    impl From<mdns::Event> for MyEvent {
+        fn from(event: mdns::Event) -> Self {
+            MyEvent::Mdns(event)
+        }
+    }
+
+    #[derive(NetworkBehaviour)]
+    #[behaviour(out_event = "MyEvent")]
+    struct MyBehaviour {
+        mdns: mdns::async_io::Behaviour,
+        g_behavior: gossipsub::Behaviour,
+    }
+
+    let id_keys = identity::Keypair::generate_ed25519();
+    let local_peer_id = PeerId::from(id_keys.public());
+    println!("{:?}", local_peer_id);
+    let tcp_tport = tcp::async_io::Transport::new(tcp::Config::default().nodelay(true))
+        .upgrade(upgrade::Version::V1)
+        .authenticate(
+            noise::NoiseAuthenticated::xx(&id_keys).expect("signing noise static keypair"),
+        )
+        .multiplex(yamux::YamuxConfig::default())
+        .timeout(Duration::from_secs(20))
+        .boxed();
+
+    let quic_tport = quic::async_std::Transport::new(quic::Config::new(&id_keys));
+    let tport = OrTransport::new(quic_tport, tcp_tport)
+        .map(|either_op, _| match either_op {
+            Either::Left((peer_id, muxer)) => (peer_id, StreamMuxerBox::new(muxer)),
+            Either::Right((peer_id, muxer)) => (peer_id, StreamMuxerBox::new(muxer)),
+        })
+        .boxed();
+
+    // we take the hash of the msg and use it as an id
+    let msg_id_fn = |msg: &gossipsub::Message| {
+        let mut hasher = DefaultHasher::new();
+        msg.data.hash(&mut hasher);
+        gossipsub::MessageId::from(hasher.finish().to_string())
+    };
+
+    let gossipsub_config = gossipsub::ConfigBuilder::default()
+        .heartbeat_interval(Duration::from_secs(10))
+        // this sets kind of msg verification. strict means enforce msg signing
+        .validation_mode(gossipsub::ValidationMode::Strict)
+        // no two msgs og same content will be propagated
+        // .message_id_fn(msg_id_fn)
+        .build()
+        .expect("valid config");
+
+    // build a gossipsub nw behavior
+    let mut g_behavior = gossipsub::Behaviour::new(
+        gossipsub::MessageAuthenticity::Signed(id_keys),
+        gossipsub_config,
+    )
+    .expect("correct config");
+
+    // create a gossip topic
+    let topic = gossipsub::IdentTopic::new("test-net");
+
+    // subscribe to our topic
+    g_behavior.subscribe(&topic)?;
+
+    // create a swarm to manage peers and events
+    let mut swarm = {
+        let mdns = mdns::async_io::Behaviour::new(mdns::Config::default(), local_peer_id)?;
+        let behavior = MyBehaviour { mdns, g_behavior };
+        SwarmBuilder::with_async_std_executor(tport, behavior, local_peer_id).build()
+    };
+
+    // read input from stdin as full lines
+    let mut stdin = io::BufReader::new(io::stdin()).lines().fuse();
+
+    // listen on all interfaces and whatever port the os assigns
+    swarm.listen_on("/ip4/0.0.0.0/udp/0/quic-v1".parse()?)?;
+    swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
+
+    println!("Enter msgs via STDIN and will be sent to all other peer via Gossipsub");
+
+    // lets start it!
+    loop {
+        select! {
+            line = stdin.select_next_some() => {
+                if let Err(e) = swarm.behaviour_mut().g_behavior
+                .publish(
+                    topic.clone(),
+                    line.expect("stdin not to close!").as_bytes()
+                ) {
+                    println!("publish error: {e:?}");
+                }
+            },
+
+            event = swarm.select_next_some() => match event {
+                SwarmEvent::Behaviour (
+                    MyEvent::Mdns(mdns::Event::Discovered(list))
+                )
+                    
+                    => {
+                        list
+                        .for_each(|(peer_id, multi_addr)| {
+                            println!("[mDns] peer discovered: pid: {peer_id}, ma: {multi_addr}");
+                            swarm
+                            .behaviour_mut()
+                            .g_behavior
+                            .add_explicit_peer(&peer_id);
+                        });
+                    },
+                SwarmEvent::Behaviour (
+                    MyEvent::Mdns(mdns::Event::Expired(list))
+                ) => {
+                    list
+                        .for_each(|(peer_id, multi_addr)| {
+                            println!("[mDns] peer expired: pid: {peer_id}, ma: {multi_addr}");
+                            swarm
+                            .behaviour_mut()
+                            .g_behavior
+                            .remove_explicit_peer(&peer_id);
+                        });
+                },
+                SwarmEvent::Behaviour (
+                    MyEvent::Gossipsub (
+                        gossipsub::Event::Message { 
+                            message,
+                            message_id: id, 
+                            propagation_source: peer_id, 
+                        }
+                    )
+                ) => {
+                    println!("New msg..");
+                    println!(
+                        "Got a msg: '{}' with id: {id} from peer: {peer_id}",
+                        String::from_utf16_lossy(&message.data.iter().map(|x| x.to_owned() as u16).collect::<Vec<u16>>()[..]),
+                    );
+                },
+                SwarmEvent::Dialing(peer_id) => println!("[Dialing] attempt on: {peer_id}"),
+                SwarmEvent::NewListenAddr {address, ..} => println!("[Listening] on: {address}"),
+                SwarmEvent::ConnectionClosed { peer_id, .. } => println!("[ConnectionClosed] with: {peer_id}"),
+                SwarmEvent::ConnectionEstablished { peer_id, .. } => println!("[ConnectionEstablished] with: {peer_id}"),
+                SwarmEvent::IncomingConnection {local_addr, send_back_addr} => println!("[Incoming] local: {local_addr} back: {send_back_addr}"),
+                _ => {},
+            },
+        }
+    }
+}

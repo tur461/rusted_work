@@ -1,0 +1,5 @@
+[[client]]
+local_addr = "127.0.0.1:8080"
+server_addr = "13.58.41.48:9527"
+password = "password"
+method = "aes-128-cfb"

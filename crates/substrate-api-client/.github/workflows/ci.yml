@@ -1,0 +1,126 @@
+name: Build & Test & Clippy
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  cancel_previous_runs:
+    name: Cancel Previous Runs
+    runs-on: ubuntu-20.04
+    steps:
+      - uses: styfle/cancel-workflow-action@0.11.0
+        with:
+          access_token: ${{ secrets.GITHUB_TOKEN }}
+
+  build:
+    name: Rust check ${{ matrix.check }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ ubuntu-latest ]
+        # We need to compile `test-no-std` separately, otherwise we have std leaks from the build-deps.
+        #
+        # `test-no-std` is only meant to check if the `substrate-api-client` compiles to `no_std`, hence
+        # we omit clippy and test there.
+        #
+        # `--locked` to enforce an up-to-date Cargo.lock
+        check: [ cargo build --release --all --locked --exclude test-no-std,
+                 cargo build --release -p test-no-std --features api-client,
+                 cargo build --release -p test-no-std --features compose-macros,
+                 cargo build --release -p test-no-std --features node-api,
+
+                 cargo build --release --examples --features staking-xt,
+
+                 cargo clippy --all --exclude test-no-std -- -D warnings,
+                 cargo clippy --features staking-xt --examples -- -D warnings,
+
+                 cargo test --all --exclude test-no-std,
+
+                 cargo fmt --all -- --check
+
+        ]
+    steps:
+      - uses: actions/checkout@v3
+      - name: init-rust-target
+        run: rustup show
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.check }}
+
+      - name: ${{ matrix.check }}
+        run: ${{ matrix.check }}
+
+      - name: Upload examples
+        uses: actions/upload-artifact@v3
+        if: matrix.check == 'cargo build --release --examples --features staking-xt'
+        with:
+          name: examples
+          path:  |
+            target/release/examples/*
+            !target/release/examples/*.d
+            !target/release/examples/*-*
+
+  fmt:
+    runs-on: ubuntu-latest
+    container: "tamasfe/taplo:0.7.0-alpine"
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Run Taplo fmt
+        run: taplo fmt --check
+
+  examples:
+    runs-on: ${{ matrix.os }}
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ ubuntu-latest ]
+        example: [
+          benchmark_bulk_xt,
+          compose_extrinsic_offline,
+          custom_nonce,
+          event_callback,
+          event_error_details,
+          generic_event_callback,
+          generic_extrinsic,
+          get_account_identity,
+          get_blocks,
+          get_existential_deposit,
+          get_storage,
+          print_metadata,
+          sudo,
+          transfer_using_seed,
+        ]
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Run latest node
+        run: |
+          docker run -p 9944:9944 -p 9933:9933 -p 30333:30333 parity/substrate:latest --dev --ws-external --rpc-external &
+
+      - name: Wait until node has started
+        run: sleep 20s
+        shell: bash
+
+      - name: Download example from previous run
+        uses: actions/download-artifact@v3
+        with:
+          name: examples
+
+      - name: Run Examples
+        timeout-minutes: 5
+        run: |
+          docker ps
+          nc -z -v 127.0.0.1 9944
+          chmod +x ${{ matrix.example }}
+          ./${{ matrix.example }}

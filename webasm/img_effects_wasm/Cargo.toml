@@ -1,0 +1,35 @@
+[package]
+name = "img_effects_wasm"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+# cdylib tells rust that the functions 
+# are going to be called
+# from other languages
+crate-type = ["cdylib"]
+
+[dependencies]
+base64 = "0.13.0"
+image = "0.23.14"
+# this crate lets us to talk with
+# rust from js
+# actually generates js-rust bindings
+wasm-bindgen = "0.2.83"
+
+[dependencies.web-sys]
+# this crate exports js functions to rust
+version = "0.3.60"
+# this crate exports so many things
+# we need only js console
+features = [
+  "console"
+]
+
+
+[profile.dev]
+panic = "abort" # disable stack unwinding on panic
+
+# the profile used for `cargo build --release`
+[profile.release]
+panic = "abort" # disable stack unwinding on panic
